@@ -20,6 +20,7 @@
 #include "qemu/bitops.h"
 
 #define SD_PROTO_VER 0x01
+#define SD_SHEEP_PROTO_VER 0x09
 
 #define SD_DEFAULT_ADDR "localhost"
 #define SD_DEFAULT_PORT 7000
@@ -70,6 +71,9 @@
 #define SD_RES_JOIN_FAILED   0x18 /* Target node had failed to join sheepdog */
 #define SD_RES_HALT          0x19 /* Sheepdog is stopped serving IO request */
 #define SD_RES_READONLY      0x1A /* Object is read-only */
+#define SD_RES_KILLED       0x8D /* Node is killed */
+
+#define SD_OP_GET_NODE_LIST  0x82
 
 /*
  * Object ID rules
@@ -94,6 +98,45 @@
 
 #define SD_INODE_SIZE (sizeof(SheepdogInode))
 #define CURRENT_VDI_ID 0
+
+struct rb_node {
+    unsigned long  rb_parent_color __attribute__ ((aligned (8)));
+#define RB_RED          0
+#define RB_BLACK        1
+    struct rb_node *rb_right __attribute__ ((aligned (8)));
+    struct rb_node *rb_left __attribute__ ((aligned (8)));
+};
+
+struct rb_root {
+    struct rb_node *rb_node;
+};
+
+struct node_id {
+    uint8_t addr[16];
+    uint16_t port;
+    uint8_t io_addr[16];
+    uint16_t io_port;
+    uint8_t pad[4];
+};
+
+struct disk_info {
+    uint64_t disk_id;
+    uint64_t disk_space;
+};
+
+#define DISK_MAX     32
+#define WEIGHT_MIN   (1ULL << 32)       /* 4G */
+
+struct sd_node {
+    struct rb_node  rb;
+    struct node_id  nid;
+    uint16_t nr_vnodes;
+    uint32_t zone;
+    uint64_t space;
+    #define SD_MAX_NODES 6144
+    #define SD_NODE_SIZE 80
+    struct disk_info disks[0];
+};
 
 typedef struct SheepdogReq {
     uint8_t proto_ver;
@@ -301,6 +344,11 @@ struct SheepdogAIOCB {
     int nr_pending;
 };
 
+struct sheep_host {
+    char addr[INET_ADDRSTRLEN];
+    uint32_t port;
+};
+
 typedef struct BDRVSheepdogState {
     BlockDriverState *bs;
 
@@ -314,6 +362,10 @@ typedef struct BDRVSheepdogState {
     char *host_spec;
     bool is_unix;
     int fd;
+
+    struct sheep_host *hosts;
+    uint32_t nr_hosts;
+    uint32_t host_index;
 
     CoMutex lock;
     Coroutine *co_send;
@@ -620,6 +672,35 @@ static void coroutine_fn resend_aioreq(BDRVSheepdogState *s, AIOReq *aio_req);
 static int reload_inode(BDRVSheepdogState *s, uint32_t snapid, const char *tag);
 static int get_sheep_fd(BDRVSheepdogState *s);
 static void co_write_request(void *opaque);
+static coroutine_fn void do_reconnect(void *opaque)
+{
+    int retry;
+    BDRVSheepdogState *s = opaque;
+    struct sheep_host *p = NULL;
+
+    if (s->fd < 0)
+        g_free(s->host_spec);
+
+    while (s->fd < 0) {
+        retry = s->nr_hosts;
+        while (retry--) {
+            p = s->hosts + s->host_index;
+            s->host_spec = g_strdup_printf("%s:%d", p->addr, p->port);
+            DPRINTF("reconnecting to %s \n", s->host_spec);
+            s->host_index = (s->host_index + 1) % s->nr_hosts;
+            s->fd = get_sheep_fd(s);
+            if (s->fd < 0) {
+                g_free(s->host_spec);
+                co_sleep_ns(rt_clock,1000000000ULL);
+            } else {
+                DPRINTF("reconnected to [%d]:%s \n", s->host_index, s->host_spec);
+                break;
+            }
+    }
+}
+
+return;
+}
 
 static AIOReq *find_pending_req(BDRVSheepdogState *s, uint64_t oid)
 {
@@ -667,14 +748,7 @@ static coroutine_fn void reconnect_to_sdog(void *opaque)
         co_write_request(opaque);
     }
 
-    /* Try to reconnect the sheepdog server every one second. */
-    while (s->fd < 0) {
-        s->fd = get_sheep_fd(s);
-        if (s->fd < 0) {
-            DPRINTF("Wait for connection to be established\n");
-            co_sleep_ns(rt_clock,1000000000ULL);
-        }
-    };
+    do_reconnect(s);
 
     /*
      * Now we have to resend all the request in the inflight queue.  However,
@@ -747,7 +821,6 @@ static void coroutine_fn aio_read_response(void *opaque)
         }
     }
     if (!aio_req) {
-        error_report("cannot find aio_req %x", rsp.id);
         goto err;
     }
 
@@ -826,6 +899,10 @@ static void coroutine_fn aio_read_response(void *opaque)
         }
         resend_aioreq(s, aio_req);
         goto out;
+        /* fall through */
+        case SD_RES_KILLED:
+            resend_aioreq(s, aio_req);
+            goto out;
     default:
         acb->ret = -EIO;
         error_report("%s", sd_strerror(rsp.result));
@@ -1336,6 +1413,67 @@ static QemuOptsList runtime_opts = {
     },
 };
 
+static int sd_get_nodes(BDRVSheepdogState *s)
+{
+    int ret;
+    struct sd_node *nodes = NULL;
+    SheepdogVdiReq hdr;
+    SheepdogVdiRsp *rsp = (SheepdogVdiRsp *)&hdr;
+    int fd;
+    unsigned int wlen = 0, rlen = 0;
+    unsigned int nodes_size;
+    int i;
+
+    nodes_size = SD_MAX_NODES * sizeof(struct sd_node);
+    nodes = g_malloc(nodes_size);
+
+    fd = connect_to_sdog(s);
+    if (fd < 0) {
+        ret = -EIO;
+        goto out;
+    }
+
+    rlen = nodes_size;
+
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.opcode = SD_OP_GET_NODE_LIST;
+    hdr.proto_ver = SD_SHEEP_PROTO_VER;
+    hdr.data_length = rlen;
+
+    ret = do_req(fd, (SheepdogReq *)&hdr,
+                nodes, &wlen, &rlen);
+
+    closesocket(fd);
+    if (ret) {
+        goto out;
+    }
+
+    if (rsp->result == SD_RES_SUCCESS) {
+        int nr_nodes = rsp->data_length / sizeof(struct sd_node);
+        s->hosts = g_malloc(nr_nodes * sizeof(struct sheep_host));
+        s->nr_hosts = nr_nodes;
+        s->host_index = 0;
+        for (i = 0; i < nr_nodes; i++) {
+            struct sheep_host *p = s->hosts + i;
+            p->port = nodes[i].nid.port;
+            if (!inet_ntop(AF_INET, nodes[i].nid.addr + 12,
+                p->addr, INET_ADDRSTRLEN)) {
+                g_free(s->hosts);
+                ret = SD_RES_SYSTEM_ERROR;
+                goto out;
+            }
+            DPRINTF("get sheep node %s:%d \n", s->hosts[i].addr, s->hosts[i].port);
+        }
+    } else {
+        ret = rsp->result;
+        g_free(s->hosts);
+    }
+
+out:
+    g_free(nodes);
+    return ret;
+}
+
 static int sd_open(BlockDriverState *bs, QDict *options, int flags,
                    Error **errp)
 {
@@ -1397,7 +1535,7 @@ static int sd_open(BlockDriverState *bs, QDict *options, int flags,
     if (flags & BDRV_O_NOCACHE) {
         s->cache_flags = SD_FLAG_CMD_DIRECT;
     }
-    s->discard_supported = true;
+    s->discard_supported = false;
 
     if (snapid || tag[0] != '\0') {
         DPRINTF("%" PRIx32 " snapshot inode was open.\n", vid);
@@ -1421,6 +1559,10 @@ static int sd_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     memcpy(&s->inode, buf, sizeof(s->inode));
+    ret = sd_get_nodes(s);
+    if (ret) {
+        goto out;
+    }
 
     bs->total_sectors = s->inode.vdi_size / BDRV_SECTOR_SIZE;
     pstrcpy(s->name, sizeof(s->name), vdi);
