@@ -187,6 +187,9 @@ typedef struct SheepdogInode {
     uint32_t data_vdi_id[MAX_DATA_OBJS];
 } SheepdogInode;
 
+
+#define SD_INODE_HEADER_SIZE offsetof(SheepdogInode, data_vdi_id)
+
 /*
  * 64 bit FNV-1a non-zero initial basis
  */
@@ -302,9 +305,6 @@ typedef struct BDRVSheepdogState {
     BlockDriverState *bs;
 
     SheepdogInode inode;
-
-    uint32_t min_dirty_data_idx;
-    uint32_t max_dirty_data_idx;
 
     char name[SD_MAX_VDI_LEN];
     bool is_snapshot;
@@ -697,6 +697,26 @@ static coroutine_fn void reconnect_to_sdog(void *opaque)
     }
 }
 
+static void  update_inode(BDRVSheepdogState *s, AIOReq *aio_req)
+{
+    struct iovec iov;
+    uint32_t offset, data_len;
+    SheepdogAIOCB *acb = aio_req->aiocb;
+    int idx = data_oid_to_idx(aio_req->oid);
+
+    offset = SD_INODE_HEADER_SIZE + sizeof(uint32_t) * idx;
+    data_len = sizeof(uint32_t);
+
+    iov.iov_base = &s->inode;
+    iov.iov_len = sizeof(s->inode);
+    aio_req = alloc_aio_req(s, acb, vid_to_vdi_oid(s->inode.vdi_id),
+                            data_len, offset, 0, 0, offset);
+    QLIST_INSERT_HEAD(&s->inflight_aio_head, aio_req, aio_siblings);
+    add_aio_request(s, aio_req, &iov, 1, false, AIOCB_WRITE_UDATA);
+
+    return;
+}
+
 /*
  * Receive responses of the I/O requests.
  *
@@ -735,25 +755,15 @@ static void coroutine_fn aio_read_response(void *opaque)
 
     switch (acb->aiocb_type) {
     case AIOCB_WRITE_UDATA:
-        /* this coroutine context is no longer suitable for co_recv
-         * because we may send data to update vdi objects */
-        s->co_recv = NULL;
         if (!is_data_obj(aio_req->oid)) {
             break;
         }
         idx = data_oid_to_idx(aio_req->oid);
 
         if (s->inode.data_vdi_id[idx] != s->inode.vdi_id) {
-            /*
-             * If the object is newly created one, we need to update
-             * the vdi object (metadata object).  min_dirty_data_idx
-             * and max_dirty_data_idx are changed to include updated
-             * index between them.
-             */
             if (rsp.result == SD_RES_SUCCESS) {
                 s->inode.data_vdi_id[idx] = s->inode.vdi_id;
-                s->max_dirty_data_idx = MAX(idx, s->max_dirty_data_idx);
-                s->min_dirty_data_idx = MIN(idx, s->min_dirty_data_idx);
+                update_inode(s, aio_req);
             }
             /*
              * Some requests may be blocked because simultaneous
@@ -1408,8 +1418,6 @@ static int sd_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     memcpy(&s->inode, buf, sizeof(s->inode));
-    s->min_dirty_data_idx = UINT32_MAX;
-    s->max_dirty_data_idx = 0;
 
     bs->total_sectors = s->inode.vdi_size / BDRV_SECTOR_SIZE;
     pstrcpy(s->name, sizeof(s->name), vdi);
@@ -1698,44 +1706,6 @@ static int sd_truncate(BlockDriverState *bs, int64_t offset)
     return ret;
 }
 
-/*
- * This function is called after writing data objects.  If we need to
- * update metadata, this sends a write request to the vdi object.
- * Otherwise, this switches back to sd_co_readv/writev.
- */
-static void coroutine_fn sd_write_done(SheepdogAIOCB *acb)
-{
-    BDRVSheepdogState *s = acb->common.bs->opaque;
-    struct iovec iov;
-    AIOReq *aio_req;
-    uint32_t offset, data_len, mn, mx;
-
-    mn = s->min_dirty_data_idx;
-    mx = s->max_dirty_data_idx;
-    if (mn <= mx) {
-        /* we need to update the vdi object. */
-        offset = sizeof(s->inode) - sizeof(s->inode.data_vdi_id) +
-            mn * sizeof(s->inode.data_vdi_id[0]);
-        data_len = (mx - mn + 1) * sizeof(s->inode.data_vdi_id[0]);
-
-        s->min_dirty_data_idx = UINT32_MAX;
-        s->max_dirty_data_idx = 0;
-
-        iov.iov_base = &s->inode;
-        iov.iov_len = sizeof(s->inode);
-        aio_req = alloc_aio_req(s, acb, vid_to_vdi_oid(s->inode.vdi_id),
-                                data_len, offset, 0, 0, offset);
-        QLIST_INSERT_HEAD(&s->inflight_aio_head, aio_req, aio_siblings);
-        add_aio_request(s, aio_req, &iov, 1, false, AIOCB_WRITE_UDATA);
-
-        acb->aio_done_func = sd_finish_aiocb;
-        acb->aiocb_type = AIOCB_WRITE_UDATA;
-        return;
-    }
-
-    sd_finish_aiocb(acb);
-}
-
 /* Delete current working VDI on the snapshot chain */
 static bool sd_delete(BDRVSheepdogState *s)
 {
@@ -1955,7 +1925,7 @@ static coroutine_fn int sd_co_writev(BlockDriverState *bs, int64_t sector_num,
     }
 
     acb = sd_aio_setup(bs, qiov, sector_num, nb_sectors);
-    acb->aio_done_func = sd_write_done;
+    acb->aio_done_func = sd_finish_aiocb;
     acb->aiocb_type = AIOCB_WRITE_UDATA;
 
     ret = sd_co_rw_vector(acb);
