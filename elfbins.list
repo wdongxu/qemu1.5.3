@@ -1,0 +1,8 @@
+.//usr/libexec/qemu-bridge-helper
+.//usr/libexec/qemu-kvm
+.//usr/libexec/ksmctl
+.//usr/lib64/libcacard.so.0.0.0
+.//usr/bin/qemu-nbd
+.//usr/bin/qemu-img
+.//usr/bin/qemu-io
+.//usr/bin/vscclient

@@ -1,0 +1,46 @@
+%dir /usr/lib/debug
+%dir /usr/lib/debug/usr
+%dir /usr/lib/debug/usr/libexec
+%dir /usr/lib/debug/usr/lib64
+%dir /usr/lib/debug/usr/bin
+%dir /usr/lib/debug/.dwz
+%dir /usr/lib/debug/.build-id
+%dir /usr/lib/debug/.build-id/bf
+%dir /usr/lib/debug/.build-id/31
+%dir /usr/lib/debug/.build-id/b4
+%dir /usr/lib/debug/.build-id/40
+%dir /usr/lib/debug/.build-id/16
+%dir /usr/lib/debug/.build-id/f8
+%dir /usr/lib/debug/.build-id/8d
+%dir /usr/lib/debug/.build-id/64
+%dir /usr/lib/debug/.build-id/73
+/usr/lib/debug/usr/libexec/ksmctl.debug
+/usr/lib/debug/usr/libexec/qemu-bridge-helper.debug
+/usr/lib/debug/usr/libexec/qemu-kvm.debug
+/usr/lib/debug/usr/lib64/libcacard.so.debug
+/usr/lib/debug/usr/lib64/libcacard.so.0.0.0.debug
+/usr/lib/debug/usr/lib64/libcacard.so.0.debug
+/usr/lib/debug/usr/bin/qemu-nbd.debug
+/usr/lib/debug/usr/bin/qemu-img.debug
+/usr/lib/debug/usr/bin/vscclient.debug
+/usr/lib/debug/usr/bin/qemu-io.debug
+/usr/lib/debug/.dwz/qemu-kvm.bc-1.5.3-501.el7.centos.x86_64
+/usr/lib/debug/.build-id/bf/2311bff7d551e8acfccaf7c3baabcb0385f757.debug
+/usr/lib/debug/.build-id/31/337289bbc937dd35bd41841e6fc9b7d6416637
+/usr/lib/debug/.build-id/31/337289bbc937dd35bd41841e6fc9b7d6416637.debug
+/usr/lib/debug/.build-id/b4/e58c54402320654278b456227bf9a239aa4171
+/usr/lib/debug/.build-id/b4/e58c54402320654278b456227bf9a239aa4171.debug
+/usr/lib/debug/.build-id/40/a5d50c87b7f380937f5458d7f66a6e24e2c79b.debug
+/usr/lib/debug/.build-id/40/a5d50c87b7f380937f5458d7f66a6e24e2c79b
+/usr/lib/debug/.build-id/16/627380e065fcb1b11fad6cbd844282f8bf38a9.debug
+/usr/lib/debug/.build-id/16/627380e065fcb1b11fad6cbd844282f8bf38a9
+/usr/lib/debug/.build-id/f8/e90ea000e9346d18853cc3c18d524278d6ebc1.debug
+/usr/lib/debug/.build-id/f8/e90ea000e9346d18853cc3c18d524278d6ebc1
+/usr/lib/debug/.build-id/8d/37cd978e0321e40e82db10973bdc6596ff56e3
+/usr/lib/debug/.build-id/8d/37cd978e0321e40e82db10973bdc6596ff56e3.debug
+/usr/lib/debug/.build-id/64/acff11dbde16fe1d1389df926c577ffd3fd12c.debug
+/usr/lib/debug/.build-id/64/acff11dbde16fe1d1389df926c577ffd3fd12c
+/usr/lib/debug/.build-id/73/b9ab2e10e1ce3d9d019e5ab7cc44c53a5286a0
+/usr/lib/debug/.build-id/73/b9ab2e10e1ce3d9d019e5ab7cc44c53a5286a0.debug
+/usr/src/debug/qemu-1.5.3
+/usr/src/debug/tmp
